@@ -7,13 +7,17 @@ requires-python = ">=3.13"
 dependencies = [
     "audioop-lts>=0.2.2",
     "cohere>=7.1.0",
+    "fastapi>=0.141.1",
+    "fastembed>=0.8.0",
     "groq>=1.7.0",
     "numpy>=2.5.2",
+    "pydantic>=2.13.5",
     "pydub>=0.25.1",
     "python-dotenv>=1.2.3",
     "qdrant-client>=1.19.0",
     "torch>=2.13.0",
     "torchaudio>=2.11.0",
     "torchcodec>=0.16.0",
+    "uvicorn>=0.52.4",
     "yt-dlp>=2026.8.19",
 ]
