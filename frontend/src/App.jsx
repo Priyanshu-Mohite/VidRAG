@@ -17,7 +17,7 @@ function App() {
 
     try {
       // 🛑 YAHAN DHYAN DE: Ye API call abhi fail hogi kyunki apna FastAPI backend abhi bana nahi hai!
-      const response = await fetch('http://localhost:8000/api/ask', {
+      const response = await fetch('https://vidrag.onrender.com/api/ask', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ question: query })
