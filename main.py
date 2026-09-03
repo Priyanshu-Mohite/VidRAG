@@ -7,6 +7,7 @@ from qdrant_client import QdrantClient, models
 from fastembed import SparseTextEmbedding
 from dotenv import load_dotenv
 from groq import Groq
+import re
 
 load_dotenv()
 
@@ -32,7 +33,9 @@ groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 print("Loading Keyword Search Model for API...")
 sparse_model = SparseTextEmbedding(model_name="Qdrant/bm25")
 
-COLLECTION_NAME = "dsa_lectures_hybrid"
+# COLLECTION_NAME = "dsa_lectures_hybrid"
+COLLECTION_NAME = "dsa_lectures_clean"
+
 # LLM_MODEL = "llama3-70b-8192" # Groq ka supported model
 LLM_MODEL = "openai/gpt-oss-120b" 
 
@@ -125,13 +128,33 @@ async def ask_question(request: QueryRequest):
         # ---------------------------------------------------------
         # PHASE 1: TWO-STAGE RETRIEVAL (BROAD FETCH + RERANK)
         # ---------------------------------------------------------
-        print("🔍 Stage 1: Fetching top 15 broad chunks from Qdrant...")
+        # print("🔍 Stage 1: Fetching top 15 broad chunks from Qdrant...")
         
-        # 1. BROAD FETCH: Qdrant se top 15 chunks uthao (bina strict threshold ke)
+        # # 1. BROAD FETCH: Qdrant se top 15 chunks uthao (bina strict threshold ke)
+        # raw_search_results = qdrant.query_points(
+        #     collection_name=COLLECTION_NAME,
+        #     query=query_vector, 
+        #     limit=15 
+        # ).points
+
+        # ---------------------------------------------------------
+        # PHASE 1: TWO-STAGE RETRIEVAL (HYBRID FETCH + RERANK)
+        # ---------------------------------------------------------
+        print("🔍 Stage 1: Fetching top 15 chunks using HYBRID Search (BM25 + Cohere)...")
+        
+        # 1. BROAD HYBRID FETCH: Qdrant se RRF (Reciprocal Rank Fusion) use karke top 15 chunks uthao
         raw_search_results = qdrant.query_points(
             collection_name=COLLECTION_NAME,
-            query=query_vector, 
-            limit=15 
+            prefetch=[
+                # Meaning samajhne ke liye Cohere Vector
+                models.Prefetch(query=query_vector, limit=15),
+                
+                # Exact spelling/keyword pakadne ke liye BM25 Sparse Vector
+                models.Prefetch(query=sparse_query, using="sparse", limit=15),
+            ],
+            query=models.FusionQuery(fusion=models.Fusion.RRF), # Dono ke results ko mix kar dega
+            with_payload=True,
+            limit=15
         ).points
 
         if not raw_search_results:
@@ -285,16 +308,16 @@ async def ask_question(request: QueryRequest):
         # ---------------------------------------------------------
         
         # 5. LLM Prompt (Relaxed, Helpful & CONCISE)
-        # 5. STRICT LLM Prompt (Anti-Hallucination)
-        prompt = f"""
-        Tu ek strict DSA AI Assistant hai. 
-        Tera ek hi kaam hai: Sirf aur sirf diye gaye CONTEXT ke basis par answer dena.
 
-        CRITICAL RULES (AGAR YE FOLLOW NAHI KIYE TOH SYSTEM CRASH HOGA):
-        1. EXACT MATCH REQUIREMENT: Agar student ne ek specific algorithm (jaise "Merge Sort") pucha hai, aur context mein kisi alag par similar sounding algorithm (jaise "Merge K Sorted Lists") ki baat ho rahi hai, toh turant REFUSE kar de.
-        2. ZERO CODE GENERATION: Agar exact code context chunks mein literally nahi bola gaya hai, toh apni pre-trained knowledge se ek line ka code bhi mat likhna.
-        3. REFUSAL EXACT PHRASE: Agar exact topic match nahi hota, toh tu apna answer EXACTLY in shabdo se shuru karega: "Sorry, Pratyush bhai ne nahi padhaya hai".
-        4. Agar exact match milta hai, toh answer Hinglish (Roman characters) mein de aur 'Video ID' cite kar. Lamba essay mat likh.
+        prompt = f"""
+        Tu ek helpful aur precise DSA AI Assistant hai. Tera kaam students ke doubts ko strictly diye gaye CONTEXT ke basis par solve karna hai.
+
+        RULES FOR ANSWERING:
+        1. CONTEXT STRICTNESS: Sirf context me di gayi information use kar. Agar user ka exact topic context me nahi hai, toh apni pre-trained knowledge use mat kar.
+        2. ZERO CODE GENERATION: Agar exact code context transcripts me explicitly nahi bola gaya hai, toh apne dimaag se ek line ka code bhi mat likhna.
+        3. EXACT REFUSAL: Agar context me answer nahi hai, toh apna answer EXACTLY in shabdo se shuru kar: "Sorry, Pratyush bhai ne nahi padhaya hai".
+        4. CLEAN OUTPUT: Answer strictly Hinglish (Roman characters) me de aur lamba essay mat likh.
+        5. CITATION FORMAT: Tu jis Chunk se information le raha hai, sentence ke end me uska index number strictly aise likhna: [1] ya [2]. Koi extra space ya fancy brackets mat lagana. Iske andar koi extra space ya fancy brackets (jaise 【 1 】) bhool kar bhi use mat karna.
 
         CONTEXT:
         {context_text}
@@ -320,30 +343,72 @@ async def ask_question(request: QueryRequest):
         # ---------------------------------------------------------
         # PHASE 4: SMART LINK GENERATION (THE FIX)
         # ---------------------------------------------------------
+        # unique_links = []
+        # if "Sorry, Pratyush bhai" not in answer:
+        #     # Ek dictionary banate hain jisme video_id ke sath uska sabse EARLIEST timestamp store hoga
+        #     video_timestamps = {}
+            
+        #     for chunk in search_results:
+        #         v_id = chunk.payload['video_id']
+                
+        #         # Check karo agar LLM ne actually ye video ID use kiya hai
+        #         if v_id in answer:
+        #             start_t = max(0, int(float(chunk.payload['start_time'])) - 5)
+                    
+        #             # Agar ye video already list me hai, toh sabse PEECHE wala (earliest) time rakho!
+        #             # Taaki student video beech se na dekhe, shuru se concept samjhe.
+        #             if v_id in video_timestamps:
+        #                 video_timestamps[v_id] = min(video_timestamps[v_id], start_t)
+        #             else:
+        #                 video_timestamps[v_id] = start_t
+                        
+        #     # Dictionary se final links bana lo (Sirf Top 1 ya 2 links bhejenge taaki React UI clean rahe)
+        #     for v_id, start_t in list(video_timestamps.items())[:4]: 
+        #         unique_links.append(f"https://youtu.be/{v_id}?t={start_t}")
+                
+        #     # Fallback: Agar LLM ne ID cite karna miss kar diya, toh reranker ka number 1 chunk bhej do
+        #     if not unique_links and search_results:
+        #         top_chunk = search_results[0]
+        #         v_id = top_chunk.payload['video_id']
+        #         start_t = max(0, int(float(top_chunk.payload['start_time'])) - 5)
+        #         unique_links.append(f"https://youtu.be/{v_id}?t={start_t}")
+
+        # ---------------------------------------------------------
+        # PHASE 4: SMART LINK GENERATION (THE FIX)
+        # ---------------------------------------------------------
         unique_links = []
         if "Sorry, Pratyush bhai" not in answer:
-            # Ek dictionary banate hain jisme video_id ke sath uska sabse EARLIEST timestamp store hoga
+            
+            # 1. Regex se answer ke andar se saare brackets wale numbers nikal lo (jaise ['1', '2'])
+            used_indices_str = re.findall(r"[\[【]\s*(\d+)\s*[\]】]", answer)
+            
+            # 2. String numbers ko integer me convert karo aur set use karke duplicate hata do
+            unique_indices = set([int(idx) for idx in used_indices_str])
+            
             video_timestamps = {}
             
-            for chunk in search_results:
-                v_id = chunk.payload['video_id']
+            for idx in unique_indices:
+                # LLM ne Chunk 1, Chunk 2 padha hai (1-based), par Python ki list 0 se shuru hoti hai (0-based)
+                # Toh Chunk 1 ka matlab search_results[0]
+                array_index = idx - 1 
                 
-                # Check karo agar LLM ne actually ye video ID use kiya hai
-                if v_id in answer:
+                # Check karenge ki index valid hai ya nahi (safety guard)
+                if 0 <= array_index < len(search_results):
+                    chunk = search_results[array_index]
+                    v_id = chunk.payload['video_id']
                     start_t = max(0, int(float(chunk.payload['start_time'])) - 5)
                     
-                    # Agar ye video already list me hai, toh sabse PEECHE wala (earliest) time rakho!
-                    # Taaki student video beech se na dekhe, shuru se concept samjhe.
+                    # Earliest timestamp save karne wala tera purana mast logic
                     if v_id in video_timestamps:
                         video_timestamps[v_id] = min(video_timestamps[v_id], start_t)
                     else:
                         video_timestamps[v_id] = start_t
                         
-            # Dictionary se final links bana lo (Sirf Top 1 ya 2 links bhejenge taaki React UI clean rahe)
+            # Dictionary se final links bana lo (Top 4 links)
             for v_id, start_t in list(video_timestamps.items())[:4]: 
                 unique_links.append(f"https://youtu.be/{v_id}?t={start_t}")
                 
-            # Fallback: Agar LLM ne ID cite karna miss kar diya, toh reranker ka number 1 chunk bhej do
+            # Fallback: Agar LLM ne bracket lagana miss kar diya, toh top chunk bhej do (Safety net)
             if not unique_links and search_results:
                 top_chunk = search_results[0]
                 v_id = top_chunk.payload['video_id']
